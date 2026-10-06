@@ -2138,3 +2138,48 @@ node scripts/trae/trae-auto-authorize.mjs --email <邮箱> --password <密码> -
 US-East（直连注册，打不了 agent API）  5 个
 SG      （代理注册，可用）             3 个  ← 其中 1 个已在 wild-work 服役
 ```
+
+## 17.5 一个号的额度到底是多少（2026-10-06 实测）
+
+### 官方定价页（www.trae.ai/pricing 原文）
+
+| 档位 | 价格 | 权益 |
+|---|---|---|
+| **Free** | **$0** | **Auto mode only** · **Limited usage** · **Limited Autocomplete** |
+| Pro | $20/月 | Auto + all models · **$20 usage / month** · Unlimited Autocomplete · 10 并发云任务 |
+| Pro+ | $60/月 | Pro 全部 + **$60 usage / month (3× Pro)** · 15 并发 |
+| Ultra | $200/月 | Pro+ 全部 + **$200 usage / month (10× Pro)** · Model early access · 20 并发 |
+
+**免费档官方没写具体数字，只说 "Limited usage"。**
+
+### 账号实际下发的配额（`user_current_entitlement_list`）
+
+```
+Free plan (product_id=0)     到期 2026-11-01（按月重置）
+  advanced_model_request_limit     = 1000   ← 高级模型请求数
+  auto_completion_limit            = 5000   ← 自动补全次数
+  premium_model_fast_request_limit = 10     ← 快速档 premium
+  premium_model_slow_request_limit = 50     ← 慢速档 premium
+  solo_agent_parallel_limit        = 2      ← 并发云任务
+  basic_usage_limit                = 1      ← 用量额度（美元口径）
+  enable_solo_agent/lite/coder/builder/web = 全部 True
+  no_bonus_quota                   = True
+
+usage:  basic_usage_amount = 0.29273   ← 已消耗，上限 1
+        → 剩余约 71%
+```
+
+### 怎么读这两套口径
+
+- **次数类**（1000 / 5000 / 10 / 50）是**请求计数**上限
+- **`basic_usage_limit`** 与付费档的 `$20 / $60 / $200 usage / month` 是同一个字段
+  → 免费档 = **1**，即约 **$1/月** 的用量额度（Pro 的 1/20）
+
+⚠️ **未测出**：单次请求消耗多少 `basic_usage_amount`。
+实测发请求前后该值**不变** —— 说明它是**分批结算**，不是实时累加。
+所以「一个号能跑多少次」目前只能按 `advanced_model_request_limit = 1000` 估。
+
+### 一句话
+
+**一个免费号 ≈ 1000 次高级模型请求 + $1 用量额度 + 免费模型（`x0`）不限次**，按月重置。
+想要更多就是堆号（额度线性，模型集合不变），或者升 Pro。
