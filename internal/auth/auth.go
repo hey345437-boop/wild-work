@@ -26,6 +26,10 @@ type Auth struct {
 	ApiHost      string // TraeWork: https://api.trae.com.cn
 	MachineID    string // TraeWork: x-machine-id
 	DeviceID     string // TraeWork: x-device-id
+	// TraeRegion TraeWork: 账号所属集群（登录回调的 userRegion，如 "sg"/"us"/"cn"）。
+	// agent 域名按区域分服（coresg-/coreva-/core-normal.trae.ai），故必须持久化。
+	// 为空表示老账号，调用方回退到 Client.AgentHost 的旧行为。
+	TraeRegion   string
 	// QoderWork COSY 机器指纹（登录/刷新时生成，持久化到 auth 文件）
 	MachineToken string // Qoder: cosy-machinetoken
 	MachineType  string // Qoder: cosy-machinetype
@@ -132,6 +136,7 @@ func Parse(raw []byte) (*Auth, error) {
 				ApiHost      string `json:"apiHost"`
 				MachineID    string `json:"machineId"`
 				DeviceID     string `json:"deviceId"`
+				TraeRegion   string `json:"traeRegion"`
 				MachineToken string `json:"machineToken"`
 				MachineType  string `json:"machineType"`
 				// signingSecret 只在 MonkeyCode 凭据里出现（其余渠道空）
@@ -158,6 +163,7 @@ func Parse(raw []byte) (*Auth, error) {
 			ApiHost:      n.Auth.ApiHost,
 			MachineID:    n.Auth.MachineID,
 			DeviceID:     n.Auth.DeviceID,
+			TraeRegion:   n.Auth.TraeRegion,
 			MachineToken: n.Auth.MachineToken,
 			MachineType:  n.Auth.MachineType,
 			// SigningSecret 仅在 MonkeyCode 凭据里出现
@@ -179,6 +185,7 @@ func Parse(raw []byte) (*Auth, error) {
 			ApiHost      string `json:"apiHost"`
 			MachineID    string `json:"machineId"`
 			DeviceID     string `json:"deviceId"`
+			TraeRegion   string `json:"traeRegion"`
 			MachineToken string `json:"machineToken"`
 			MachineType  string `json:"machineType"`
 			// signingSecret 只在 MonkeyCode 凭据里出现（其余渠道空）
@@ -202,6 +209,7 @@ func Parse(raw []byte) (*Auth, error) {
 			ApiHost:      f.ApiHost,
 			MachineID:    f.MachineID,
 			DeviceID:     f.DeviceID,
+			TraeRegion:   f.TraeRegion,
 			MachineToken: f.MachineToken,
 			MachineType:  f.MachineType,
 			// SigningSecret 仅在 MonkeyCode 凭据里出现
@@ -242,6 +250,7 @@ func (a *Auth) saveAtomicLocked() error {
 			"apiHost":      a.ApiHost,
 			"machineId":    a.MachineID,
 			"deviceId":     a.DeviceID,
+			"traeRegion":   a.TraeRegion,
 			"machineToken": a.MachineToken,
 			"machineType":  a.MachineType,
 			// signingSecret 只在 MonkeyCode 凭据里非空；其余渠道写空串无副作用

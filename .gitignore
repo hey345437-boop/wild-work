@@ -17,6 +17,7 @@ ref/
 docs/*
 !docs/三接口兼容改造备忘.md
 !docs/用量积分流水记账备忘.md
+!docs/trae-渠道接入备忘.md
 
 # 临时文件
 temp/
@@ -32,3 +33,10 @@ temp/
 Thumbs.dbgithub_token.txt
 HANDOFF.md
 GO多平台发布备忘.md
+
+
+# 本地构建产物与备份（14MB 二进制，不入库）
+/wild-work
+/wild-work.*
+/config.json.bak*
+/start.sh.bak*

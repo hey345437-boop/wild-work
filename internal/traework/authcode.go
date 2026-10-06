@@ -24,9 +24,15 @@ import (
 	"wild-work/internal/auth"
 )
 
-// EpAuthCodeExchange AuthCode 交换端点（首次换 token 无签名，对齐 codex-app-transfer 逆向实现）。
-// 注意：此路径同时用于 refresh 续期（带 DeviceProof 签名），但首次 AuthCode 交换不需要签名。
-const EpAuthCodeExchange = "/trae/api/v3/oauth/ExchangeToken"
+// EpAuthCodeExchange AuthCode 首次交换端点（无签名）。
+// 反编译 www.trae.ai bundle (async/9839) 得到两个同名方法，路径不同：
+//
+//	TraeExchangeToken   -> {base}/cloudide/api/v3/trae/oauth/ExchangeToken   ← 本次实测 200
+//	TraeExchangeTokenV2 -> {base}/trae/api/v3/oauth/ExchangeToken            ← api.trae.ai 上 404
+//
+// 用 V2 的路径去拼 api.trae.ai 会恒 404（TLB），整条登录链路报废；且 404 属路由不存在、
+// authCode 不会被消费，把它当成「该 origin 没有这个端点」继续换下一个 origin 才正确。
+const EpAuthCodeExchange = "/cloudide/api/v3/trae/oauth/ExchangeToken"
 
 // DeviceInfo 设备指纹（AuthCode 交换必需，官方客户端 bb() 注入）。
 type DeviceInfo struct {
@@ -68,11 +74,11 @@ func (c *Client) ExchangeAuthCode(a *auth.Auth, authCode, codeVerifier string) (
 	di := DeviceInfo{
 		DeviceID:        a.DeviceID,
 		MachineID:       a.MachineID,
-		PlatformCode:    "SOLO_PC", // 对齐抓包 GetPCAuthCode 的 PlatformCode
+		PlatformCode:    PlatformCode, // 与授权页 platformCode 对齐（IDE 路由 = IDE_PC）
 		DeviceType:      "PC",
 		DeviceName:      deviceDisplayName(),
 		DeviceModel:     DeviceBrand,
-		ClientVersion:   IdeVersion,
+		ClientVersion:   IdeBuildVersion,
 		DevicePublicKey: pubPEM,
 		DeviceBrand:     DeviceBrand,
 		DeviceCPU:       "",
@@ -81,19 +87,24 @@ func (c *Client) ExchangeAuthCode(a *auth.Auth, authCode, codeVerifier string) (
 	}
 	body := map[string]any{
 		"ClientID":     c.ClientID,
+		"ClientSecret": ClientSecret,
 		"AuthCode":     authCode,
 		"CodeVerifier": codeVerifier,
 		"DeviceInfo":   di,
-		"IDEVersion":   IdeVersion,
+		"IDEVersion":   IdeBuildVersion,
 	}
 	raw, _ := json.Marshal(body)
 
-	// 依次尝试候选 origin（回调 host 优先，再回退 trae.cn / trae.com.cn）。
-	// 关键：authCode 是一次性的，4xx 属终态（不换 origin 重试）——换 origin 会把首因
+	// 依次尝试候选 origin（回调 host 优先，再回退 api.trae.ai）。
+	// 关键：authCode 是一次性的，**语义性** 4xx 属终态（不换 origin 重试）——换 origin 会把首因
 	// 覆盖成语义更模糊的兜底错误（实测：首选 api.trae.cn 的 403/20401 设备数上限，被回退
 	// 的 api.trae.com.cn 的 400/10101 覆盖后再打印，表象彻底指向参数写错）。故 4xx
 	// 立即返回携带**首个** origin 真实响应的 *AuthCodeRejectedError；仅 429/408/5xx /
 	// 传输层错误为暂时性，继续尝试下一个 origin。
+	//
+	// 例外：**404 不算终态**。404 表示「该 origin 上没有这个路由」，请求根本没进业务层，
+	// authCode 不会被消费（实测同 code 连打 404 端点后再打正确端点仍 200）。若不排除，
+	// 回退 origin 的 404 会把首个 origin 的真实错误挤掉，整条链路表现为「参数写错」。
 	var lastErr error
 	for _, origin := range authCodeOrigins(a.ApiHost) {
 		req, err := http.NewRequest(http.MethodPost, origin+EpAuthCodeExchange, bytes.NewReader(raw))
@@ -112,8 +123,12 @@ func (c *Client) ExchangeAuthCode(a *auth.Auth, authCode, codeVerifier string) (
 		resp.Body.Close()
 		if resp.StatusCode >= 400 {
 			rj := &AuthCodeRejectedError{Status: resp.StatusCode, Origin: origin, Body: string(data)}
-			if resp.StatusCode >= 400 && resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusRequestTimeout {
-				// 4xx（除 429/408）= 终态：authCode 已一次性耗尽，重试无意义。
+			if resp.StatusCode == http.StatusNotFound {
+				lastErr = rj
+				continue // 路由不存在：该 origin 没有这个端点，试下一个
+			}
+			if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusRequestTimeout {
+				// 4xx（除 404/429/408）= 终态：authCode 已一次性耗尽，重试无意义。
 				// 识别 20401 设备数上限（可恢复动作：去其它设备登出释放名额）。
 				return nil, rj
 			}
@@ -176,11 +191,12 @@ func IsDeviceLimitReached(err error) bool {
 		strings.Contains(strings.ToLower(rj.Body), "device limit"))
 }
 
-// authCodeOrigins 候选交换 origin：api_host（api.trae.cn）优先，再回退回调 host / trae.com.cn。
+// authCodeOrigins 候选交换 origin：**回调 host 优先**，再回退 UgHost / api.trae.ai。
+// 回调 URL 里的 host 就是该账号被分到的 UG 集群（实测美国区账号 = https://ug-normal.us.trae.ai），
+// 交换端点只在这个集群上存在；把它排在后面会让前面的 404 先落地。
 func authCodeOrigins(callbackHost string) []string {
 	out := []string{}
-	// 权威实现用 api.trae.cn（不带 com）
-	for _, h := range []string{UgHost, strings.TrimSpace(callbackHost), "https://api.trae.com.cn"} {
+	for _, h := range []string{strings.TrimSpace(callbackHost), UgHost, "https://api.trae.ai"} {
 		if h != "" && !containsString(out, h) {
 			out = append(out, strings.TrimRight(h, "/"))
 		}

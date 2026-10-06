@@ -31,6 +31,7 @@ type Result struct {
 	ApiHost      string
 	MachineID    string
 	DeviceID     string
+	TraeRegion   string
 	UID          string
 	EnterpriseID string
 	Nickname     string
@@ -44,6 +45,7 @@ type state struct {
 	AuthCode     string `json:"authCode,omitempty"`     // PKCE 新流程：回调 authCodeInfo 里的 AuthCode
 	CodeVerifier string `json:"codeVerifier,omitempty"` // 登录 URL 配对的 PKCE verifier（必须保存）
 	Host         string `json:"host,omitempty"`
+	UserRegion   string `json:"userRegion,omitempty"` // sg/us/cn —— 决定 agent 域名
 	Err          string `json:"err,omitempty"`
 }
 
@@ -108,6 +110,7 @@ func Start(client *http.Client, statePath string) (string, error) {
 		st.RefreshToken = info.RefreshToken
 		st.AccessToken = info.AccessToken
 		st.AuthCode = info.AuthCode
+		st.UserRegion = info.UserRegion
 		if st.RefreshToken == "" && st.AccessToken == "" && st.AuthCode == "" {
 			st.Err = "missing refreshToken in callback"
 		}
@@ -133,8 +136,17 @@ func Start(client *http.Client, statePath string) (string, error) {
 	u, _ := url.Parse(traework.ConsoleHost + "/authorization")
 	v := u.Query()
 	v.Set("login_version", "1")
-	v.Set("auth_from", "solo")
-	v.Set("login_channel", "native_ide")
+	// auth_from 决定网页落到哪个路由组件（实测 2026-10-05）：
+	//   auth_from=solo -> chunk 9934: <C scope="solo" platformCode="SOLO_PC" blockTTP={true} />
+	//                     blockTTP 是硬编码常量，配合 isUS(StoreCountry) 直接渲染
+	//                     "TraeWork Unavailable"，永远不会出现登录按钮。
+	//   auth_from=trae -> chunk 7093: <C scope="trae" platformCode="IDE_PC" />（**不传 blockTTP**）
+	//                     同一个账号、同一个 client_id 下正常渲染登录卡片。
+	// 故国际版一律走 trae 路由（TRAE IDE / SOLO 产品线），地区墙即为路由级常量。
+	v.Set("auth_from", "trae")
+	// login_channel 是授权页自动流程的闸门：页面里 N = ("ai_extension" === login_channel)，
+	// N 为假则整段 flow 被跳过，页面永远停在 "Authenticating"（已实测三十秒以上无进展）。
+	v.Set("login_channel", "ai_extension")
 	v.Set("plugin_version", traework.PluginVersion)
 	v.Set("auth_type", "local")
 	v.Set("client_id", traework.ClientID)
@@ -149,7 +161,7 @@ func Start(client *http.Client, statePath string) (string, error) {
 	v.Set("x_device_type", "windows")
 	v.Set("x_os_version", traework.OSVersion)
 	v.Set("x_env", "")
-	v.Set("x_app_version", traework.IdeVersion)
+	v.Set("x_app_version", traework.AuthAppVersion)
 	v.Set("x_app_type", "stable")
 	v.Set("code_challenge", codeChallenge)
 	v.Set("code_challenge_method", "S256")
@@ -182,7 +194,7 @@ func Poll(client *http.Client, statePath string) (Result, error) {
 	}
 	c := traework.New()
 	c.HTTP = client
-	a := &auth.Auth{Kind: "traework", RefreshToken: st.RefreshToken, AccessToken: st.AccessToken, ApiHost: st.Host, MachineID: st.MachineID, DeviceID: st.DeviceID, Domain: "trae.cn"}
+	a := &auth.Auth{Kind: "traework", RefreshToken: st.RefreshToken, AccessToken: st.AccessToken, ApiHost: st.Host, MachineID: st.MachineID, DeviceID: st.DeviceID, Domain: "trae.ai", TraeRegion: st.UserRegion}
 	if st.AuthCode != "" {
 		// PKCE 新流程：AuthCode + codeVerifier + 设备公钥交换
 		res, err := c.ExchangeAuthCode(a, st.AuthCode, st.CodeVerifier)
@@ -226,7 +238,7 @@ func Poll(client *http.Client, statePath string) (Result, error) {
 		return Result{}, err
 	}
 	_ = os.Remove(statePath)
-	return Result{AccessToken: a.AccessToken, RefreshToken: a.RefreshToken, ExpiresAt: a.ExpiresAt, Domain: "trae.cn", ApiHost: st.Host, MachineID: st.MachineID, DeviceID: st.DeviceID, UID: uid, EnterpriseID: ent, Nickname: nick}, nil
+	return Result{AccessToken: a.AccessToken, RefreshToken: a.RefreshToken, ExpiresAt: a.ExpiresAt, Domain: "trae.ai", ApiHost: st.Host, MachineID: st.MachineID, DeviceID: st.DeviceID, TraeRegion: st.UserRegion, UID: uid, EnterpriseID: ent, Nickname: nick}, nil
 }
 
 func SaveAuth(authDir string, r Result) (string, error) {
@@ -234,7 +246,7 @@ func SaveAuth(authDir string, r Result) (string, error) {
 		return "", fmt.Errorf("missing uid in result")
 	}
 	doc := map[string]any{
-		"auth":    map[string]any{"accessToken": r.AccessToken, "refreshToken": r.RefreshToken, "expiresAt": r.ExpiresAt, "domain": r.Domain, "apiHost": r.ApiHost, "machineId": r.MachineID, "deviceId": r.DeviceID},
+		"auth":    map[string]any{"accessToken": r.AccessToken, "refreshToken": r.RefreshToken, "expiresAt": r.ExpiresAt, "domain": r.Domain, "apiHost": r.ApiHost, "machineId": r.MachineID, "deviceId": r.DeviceID, "traeRegion": r.TraeRegion},
 		"account": map[string]any{"uid": r.UID, "enterpriseId": r.EnterpriseID, "nickname": r.Nickname},
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
@@ -266,6 +278,7 @@ type CallbackInfo struct {
 	RefreshToken string
 	AccessToken  string
 	AuthCode     string // PKCE 新流程：authCodeInfo.AuthCode
+	UserRegion   string // 回调里的 userRegion：sg/us/cn —— 决定 agent 域名
 }
 
 // ParseCallback 解析 TRAE 登录回调链接，提取凭证字段。
@@ -287,6 +300,8 @@ func ParseCallback(rawURL string) CallbackInfo {
 		return info
 	}
 	q := u.Query()
+	// userRegion 决定后续打哪个 agent 域名（按区域分服），必须在所有 return 之前取。
+	info.UserRegion = q.Get("userRegion")
 	info.RefreshToken = q.Get("refreshToken")
 	if info.RefreshToken != "" {
 		return info

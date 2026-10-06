@@ -17,6 +17,12 @@ func SOLOHeaders(req *http.Request, a *auth.Auth, stream bool) {
 	}
 	req.Header.Set("User-Agent", clientUA)
 	at := a.JWT()
+	// ★ agent 一族（/api/ide/*、/api/agent/*）认的是 `x-ide-token`。
+	// 依据：Trae IDE 的 ai-completion 扩展里所有区域（cn/sg/us）共用
+	// {"authHeader":"x-ide-token"}；实测同一个 accessToken，用 x-ide-token 打
+	// coresg-normal.trae.ai 返回 200，只带 Authorization: Cloud-IDE-JWT 则 401 code:1001。
+	// 三个 Authorization 族头保留不动（cloudide 一族仍要用，且 CN 渠道行为不变）。
+	req.Header.Set("x-ide-token", at)
 	req.Header.Set("Authorization", "Cloud-IDE-JWT "+at)
 	req.Header.Set("X-Cloudide-Token", at)
 	req.Header.Set("X-Ide-Token", at)

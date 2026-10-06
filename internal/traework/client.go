@@ -95,7 +95,19 @@ func (c *Client) pricingBase() string {
 	return WorkHost
 }
 
-func (c *Client) agentBase() string { return c.AgentHost }
+// agentBase 返回该账号该用的 agent 域名。
+//
+// agent 是按区域分服的（真机 case：SG 账号 → coresg-normal.trae.ai，
+// 美区 → coreva-normal.trae.ai）。老账号没有 TraeRegion，返回空串，
+// 此时回退到 Client.AgentHost，行为与改动前完全一致。
+func (c *Client) agentBase(a *auth.Auth) string {
+	if a != nil {
+		if h := AgentHostForRegion(a.TraeRegion); h != "" {
+			return h
+		}
+	}
+	return c.AgentHost
+}
 func (c *Client) ugBase() string    { return c.UgHost }
 func (c *Client) oauthBase() string { return c.OAuthHost }
 
@@ -196,7 +208,7 @@ func normalizeExpiresAt(v int64) int64 {
 }
 
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body, c.Function)))
+	req, err := http.NewRequest(http.MethodPost, c.agentBase(a)+EpChat, bytes.NewReader(PrepareBody(body, c.Function)))
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -226,7 +238,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	// mode_type=nil 返回全部配置，按 config_name 去重避免流式/非流式重复。
 	body := map[string]any{"function": c.Function, "config_names": nil, "need_prompt": false, "current_config_info": nil, "poly_prompt": true, "mode_type": nil, "agent_type": nil}
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpModels, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, c.agentBase(a)+EpModels, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +285,13 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 // FetchModelPricing 从 /api/remote/v1/models 拉取模型积分倍率。
 // 按 config_name 去重，解析 features.consumption_rate.rate。
 func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
-	url := c.pricingBase() + EpModelsPricing + "?functions=" + c.PricingFunctions + "&show_custom_model=true"
+	// 费率接口同样按区域分服：国际版打 work.trae.ai 只会拿回一坨 HTML
+	// （pricing parse: invalid character '<'），打 agent 域名才是 JSON。
+	base, referer := c.pricingBase(), "https://work.trae.ai/"
+	if h := AgentHostForRegion(a.TraeRegion); h != "" {
+		base, referer = h, h+"/"
+	}
+	url := base + EpModelsPricing + "?functions=" + c.PricingFunctions + "&show_custom_model=true"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -284,7 +302,7 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	req.Header.Set("X-Preferenced-Language", "zh-cn")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0")
-	req.Header.Set("Referer", "https://work.trae.cn/")
+	req.Header.Set("Referer", referer)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -350,6 +368,17 @@ func parseTraeFeatures(features string) float64 {
 		return 0
 	}
 	var f struct {
+		// ★ 新版（国际版实测 2026-10-06）：倍率在 cost.data.manual_usage。
+		// 扫过 29 个模型的 features 顶层键 = {multimodal, reasoning, cost, access,
+		// memory, video_multimodal, beta}，其中 15 个带 cost，计费键只有
+		// cost.data.manual_usage 这一个 —— 老的 consumption_rate / discount 全不见了。
+		Cost struct {
+			Enable bool `json:"enable"`
+			Data   struct {
+				ManualUsage float64 `json:"manual_usage"`
+			} `json:"data"`
+		} `json:"cost"`
+		// 以下两个是旧版（CN）的形态，保留作兜底。
 		ConsumptionRate struct {
 			Enable bool `json:"enable"`
 			Data   struct {
@@ -365,6 +394,9 @@ func parseTraeFeatures(features string) float64 {
 	}
 	if err := json.Unmarshal([]byte(features), &f); err != nil {
 		return 0
+	}
+	if f.Cost.Enable && f.Cost.Data.ManualUsage > 0 {
+		return f.Cost.Data.ManualUsage
 	}
 	// 折扣价优先
 	if f.Discount.Enable && f.Discount.Data.ConsumptionRate > 0 {
@@ -575,7 +607,16 @@ func (p entPackage) usable() bool {
 // available_endpoint==0，2026-09-23 起该字段也失效（专用池被标成 0），
 // 一度改用 product_id==209，2026-09-26 证伪后撤回（详见 usable 注释）。
 func (c *Client) fetchEntUsage(a *auth.Auth) ([]entPackage, int64, error) {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte(`{"require_usage":true}`)))
+	// 国际版：/trae/api/v2/pay/*_user_ent_usage 全 404；换成账号 host 上的
+	// user_current_entitlement_list，响应体里同样是 user_entitlement_pack_list。
+	base, ep := c.ugBase(), EpEntUsage
+	if a.TraeRegion != "" {
+		ep = EpEntUsageIntl
+		if a.ApiHost != "" {
+			base = strings.TrimRight(a.ApiHost, "/")
+		}
+	}
+	req, err := http.NewRequest(http.MethodPost, base+ep, bytes.NewReader([]byte(`{"require_usage":true}`)))
 	if err != nil {
 		return nil, 0, err
 	}
