@@ -2265,6 +2265,16 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	// POST /api/account/reload —— 拿 auth_dir 的最新文件重新对齐账号池。
+	// 场景:**外部工具**（dola 生产台的 trae 授权链路）把授权好的凭据直接写进 auth_dir,
+	// 不该为了让它生效而重启整个 daemon（重启会打断正在跑的请求,还会丢粘性路由）。
+	// reloadAccounts 本身是幂等的「扫目录 → SyncToDir」,重复调用无副作用。
+	// ⚠️ oczen 的匿名虚拟账号不在 SyncToDir 范围内（不变量 21）——
+	//    它只在启动装配时注入一次,本接口不会把它弄没。
+	mux.HandleFunc("POST /api/account/reload", func(w http.ResponseWriter, r *http.Request) {
+		a.reloadAccounts()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
 	mux.HandleFunc("POST /api/account/disable", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UID      string `json:"uid"`
