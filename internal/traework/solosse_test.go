@@ -80,6 +80,11 @@ func TestStreamErrorKindClassification(t *testing.T) {
 		{3004, provider.ErrSoftRate, "按账号限流 → 短冷却，换号可恢复"},
 		{9074, provider.ErrSoftRate, "同族限流码（客户端签名校验不过时的拒绝）"},
 		{1001, provider.ErrClient, "模型不可用等其余业务错误不罚账号"},
+		// ★ 4008 = 额度耗尽（免费号只有约 $1）。必须归长冷却，否则 pool 会一直
+		// 挑这个烧干的号 —— 用户看到「永远 4008、换号也没用」，号池轮换等于没有。
+		{4008, provider.ErrHardCredit, "额度耗尽 → 长冷却，让池子去挑下一个号"},
+		// 4011 = traecode 的频率限制，实测隔 20s 重试仍是 4011（非偶发抖动）
+		{4011, provider.ErrSoftRate, "traecode 频率限制 → 短冷却"},
 	}
 	for _, c := range cases {
 		got := (&SOLOStreamError{Code: c.code}).Kind()

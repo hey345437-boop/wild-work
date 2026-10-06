@@ -62,8 +62,23 @@ func (e *SOLOStreamError) Error() string {
 // Kind 将 SSE 流内错误分类。
 //
 //	1005 → provider.ErrHardCredit（权益/余额不足 → 长冷却）
-//	3004 / 9074 → provider.ErrSoftRate（限流 → 短冷却）
+//	4008 → provider.ErrHardCredit（★ 额度耗尽 → 长冷却，这是号池轮换的关键）
+//	3004 / 9074 / 4011 → provider.ErrSoftRate（限流 → 短冷却）
 //	其余 → provider.ErrClient
+//
+// ★ 4008 = "Your requests have exceeded the quota"。**免费号只有约 $1 用量额度**
+//   （官方定价页 Free 档只写 "Limited usage"，账号下发的 basic_usage_limit = 1），
+//   烧完就恒 4008 —— 实测烧完后 /notify_usage 帧里 remain_usage 全 0。
+//
+//   在把它归到 ErrHardCredit 之前，它是 ErrClient：**不冷却账号**，于是 pool 会
+//   一直挑这个烧干的号，用户看到的就是「永远 4008、换号也没用」。这就是号池轮换
+//   缺的那一环 —— 必须让池子知道这个号废了，才会去挑下一个。
+//
+//   归长冷却（12h）而不是永久禁用：额度是按月/按周期重置的，过一阵它自己会活。
+//   12h 后重试一次，成本远低于永久损失一个号。
+//
+// 4011 = traecode(solo_agent) 的 "usage exceeds frequency limit"，实测隔 20 秒
+//   重试仍是 4011（不是偶发抖动），归软限流。
 //
 // 3004 归软限流的依据（**按 R23b：这是待强化的假设，不是既成事实**）：
 // 2026-09-29 09:00 checkin 路径的观察——同一秒、同一 IP 下 8 个 traework 账号中
@@ -75,9 +90,9 @@ func (e *SOLOStreamError) Error() string {
 // 某账号闲置一分钟（风险不对称），不会造成危害。详见 AGENTS.md R39。
 func (e *SOLOStreamError) Kind() provider.ErrKind {
 	switch e.Code {
-	case 1005:
+	case 1005, 4008:
 		return provider.ErrHardCredit
-	case 3004, 9074:
+	case 3004, 9074, 4011:
 		return provider.ErrSoftRate
 	}
 	return provider.ErrClient
