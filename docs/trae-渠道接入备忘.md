@@ -2046,3 +2046,95 @@ Trae 的模型名很多是**厂代号**，拿 `KNOWN_CODENAMES` 一查就清楚�
 它们是 **OpenCodeZen 自己的匿名化代号**，不是厂商代号，公开资料里也没有映射表。
 
 而且 oczen 的 API **不返回** `extra_info` 那类字段，所以**目前无法从协议层挖出真身**。
+
+---
+
+# 十七、成果梳理与造号成本
+
+## 17.1 这次做成了什么
+
+| # | 成果 | 状态 |
+|---|------|------|
+| 1 | 定位「授权页永远 Authenticating」= `login_channel≠ai_extension` | ✅ 反编译 + 实测 |
+| 2 | 定位「地区墙」= 路由级常量 `blockTTP`，`solo` 路由写死 true | ✅ 六值矩阵实测 |
+| 3 | 找到可用路由 `auth_from=trae` + clientID `ono9krqynydwx5` | ✅ |
+| 4 | 反编译真 IDE，拿到 **DeviceProof 签名算法**并被服务端验证通过 | ✅ |
+| 5 | 定位 401 真因：**agent 域名按区域分服** + **认证头是 `x-ide-token`** | ✅ 真机日志 + bootConfig |
+| 6 | 打通 SG 区账号端到端：注册 → 网页授权 → token → **真对话 PONG** | ✅ |
+| 7 | wild-work 接入（6 文件 / 174 行），向后兼容 | ✅ 构建+测试全绿 |
+| 8 | 接进 DSH（11 个模型，实测全通） | ✅ |
+| 9 | 修掉三个遗留：费率域名、倍率字段、额度端点 | ✅ |
+| 10 | 修掉弹窗死循环（`wb-stack.sh` 用健康检查当存活判据） | ✅ |
+| 11 | 全量实测 42+14 个模型，筛出真实可用集合 | ✅ |
+| 12 | 挖出模型后端真名（`aws-kimi-k3` / `gpt-5.2-2025-12-11`） | ✅ |
+| 13 | **【未解】** agent API 为何对 US 区账号恒 401 | ⚠️ 只确认与区域相关 |
+
+## 17.2 代码去向
+
+```
+https://github.com/hey345437-boop/wild-work     （fork of rockswang/wild-work）
+  ba6ded3  feat(traework): 打通 Trae 国际版 —— 区域域名、x-ide-token、DeviceProof
+
+  internal/traework/      区域域名表 / x-ide-token / 费率与额度修正
+  internal/auth/          TraeRegion 字段
+  internal/login_trae/    回调 userRegion 落盘
+  scripts/trae/           注册机 + 授权工作流 + 探针（14 个文件）
+  docs/trae-渠道接入备忘.md   完整逆向记录
+```
+
+## 17.3 造一个号要多少钱
+
+### 现金成本：**¥0**
+
+| 项 | 成本 | 说明 |
+|---|---|---|
+| 一次性邮箱 | **0** | temp-mail.io，7 个域名轮换 |
+| 代理出口 | **0（边际）** | 本地 sing-box 已在跑，79 个 inbound 和其他项目共用 |
+| 注册算力 | **0** | 本机 headless chromium |
+| 软件 | **0** | 全部自研 |
+
+### 时间成本（实测）
+
+```
+自动注册      43 秒      ← 实测 kptowoauyh@ruutukf.com
+人工操作      1 次点击    ← 授权页的「Log in」（反爬签名挡住的唯一一步）
+其余全自动    ~40 秒      ← 等授权页→点授权→收回调→换 token→落盘
+────────────────────────
+合计          ≈ 1.5 分钟/号
+```
+
+### 每个号换到多少额度
+
+```
+Free plan (product_id=0)
+  advanced_model_request_limit     = 1000
+  premium_model_fast_request_limit = 10
+  premium_model_slow_request_limit = 50
+  enable_solo_agent / solo_lite / coder = True
+```
+
+外加 `x0` 免费模型（`traework/kimi-k3` 等）不计费。
+
+### 规模化的账
+
+**账号数↑ = 额度线性↑，但模型集合不变。**
+
+每个免费号拿到的档位是一样的（同样 5 个 traework 模型、同样 1000/10/50 配额），
+所以多账号只解决**并发与额度**，不会解锁新模型。
+
+想解锁更多模型，只有两条路：升级付费档，或者换 `solo_agent` 权益（`traecode` 那 37 个）。
+
+```bash
+# 批量造号
+node scripts/trae/trae-batch.mjs 10 socks5://127.0.0.1:39042
+
+# 逐个授权（每个点一次 Log in）
+node scripts/trae/trae-auto-authorize.mjs --email <邮箱> --password <密码> --proxy socks5://127.0.0.1:39042
+```
+
+## 17.4 账号池现状
+
+```
+US-East（直连注册，打不了 agent API）  5 个
+SG      （代理注册，可用）             3 个  ← 其中 1 个已在 wild-work 服役
+```
